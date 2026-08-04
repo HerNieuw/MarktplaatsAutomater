@@ -177,6 +177,8 @@ COLUMNS = [
     "waarde_min", "waarde_max", "vraagprijs", "aanmaakdatum", "tijdsperiode",
     "opslaglocatie", "sublocatie", "rij", "folder_locatie", "verkocht",
     "verkoopprijs", "verkoopdatum", "algemene_voorwaarden", "advertentie_url",
+    "leverwijze", "klant_naam", "klant_telefoon", "klant_email",
+    "ophaal_afspraak", "track_trace",
 ]
 
 def build_description(product):
