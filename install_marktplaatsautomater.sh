@@ -88,7 +88,7 @@ source MarktplaatsAutomater/venv/bin/activate
 
 pip install --upgrade pip
 # pygobject wordt NIET via pip geïnstalleerd - we gebruiken de systeem versie!
-pip install selenium gspread google-auth pandas requests pillow
+pip install selenium pandas requests pillow
 
 echo -e "${GREEN}✅ Alle Python packages geïnstalleerd${NC}"
 echo ""
@@ -170,15 +170,6 @@ except ImportError as e:
     print("📌 Installeer selenium met: pip install selenium")
     sys.exit(1)
 
-# Probeer gspread te importeren
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except ImportError as e:
-    print(f"❌ Fout: {e}")
-    print("📌 Installeer gspread met: pip install gspread google-auth")
-    sys.exit(1)
-
 # ============================================
 # CONFIGURATIE BESTAND
 # ============================================
@@ -200,16 +191,11 @@ class ConfigManager:
     def _default_config(self):
         return {
             "storage": {
-                "backend": "sheets",
                 "xml_path": ""
             },
             "chrome": {
                 "user_data_dir": os.path.expanduser("~/.config/google-chrome"),
                 "profile": "Default"
-            },
-            "google_sheets": {
-                "sheet_url": "",
-                "credentials_file": "credentials.json"
             },
             "paths": {
                 "base_image_path": os.path.expanduser("~/Afbeeldingen")
@@ -263,14 +249,23 @@ class Logger:
     def log(self, msg, level="INFO"):
         timestamp = time.strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {level}: {msg}\n"
-        if self.buffer:
-            end_iter = self.buffer.get_end_iter()
-            self.buffer.insert(end_iter, formatted)
-            mark = self.buffer.create_mark(None, self.buffer.get_end_iter(), False)
-            self.text_view.scroll_to_mark(mark, 0.0, True, 0.0, 0.0)
         print(formatted, end="")
-        while Gtk.events_pending():
-            Gtk.main_iteration()
+        if self.buffer:
+            # GTK is niet thread-safe. Het hele plaats-proces draait in een
+            # achtergrondthread, dus rechtstreeks aan self.buffer/text_view
+            # zitten (zoals hier eerder gebeurde, inclusief een handmatige
+            # Gtk.main_iteration()-pomp) is een klassieke oorzaak van
+            # willekeurige, moeilijk te reproduceren crashes. Via
+            # GLib.idle_add gebeurt de daadwerkelijke widget-aanpassing
+            # altijd op de GTK-hoofdthread.
+            GLib.idle_add(self._append_to_buffer, formatted)
+    
+    def _append_to_buffer(self, formatted):
+        end_iter = self.buffer.get_end_iter()
+        self.buffer.insert(end_iter, formatted)
+        mark = self.buffer.create_mark(None, self.buffer.get_end_iter(), False)
+        self.text_view.scroll_to_mark(mark, 0.0, True, 0.0, 0.0)
+        return False  # eenmalige idle-callback, niet herhalen
     
     def info(self, msg): self.log(msg, "INFO")
     def warning(self, msg): self.log(msg, "⚠️")
@@ -310,20 +305,30 @@ Zondag en maandag Gesloten"""
 COLUMNS = [
     "artikelnummer", "titel", "categorie", "omschrijving", "online",
     "lengte", "breedte", "hoogte", "gewicht", "conditie", "staat_details",
-    "waarde_min", "waarde_max", "vraagprijs", "aanmaakdatum", "tijdsperiode",
-    "opslaglocatie", "sublocatie", "rij", "folder_locatie", "verkocht",
-    "verkoopprijs", "verkoopdatum", "algemene_voorwaarden", "advertentie_url",
+    "waarde_min", "waarde_max", "vraagprijs", "aanmaakdatum", "aanmaaktijd",
+    "tijdsperiode", "opslaglocatie", "sublocatie", "rij", "folder_locatie",
+    "verkocht", "verkoopprijs", "verkoopdatum", "algemene_voorwaarden",
+    "url_1", "url_2", "url_3", "url_4", "url_5",
+    "leverwijze", "klant_naam", "klant_telefoon", "klant_email",
+    "ophaal_afspraak", "track_trace", "verwerkt_door", "toegewezen_aan",
 ]
+COL = {naam: idx for idx, naam in enumerate(COLUMNS)}
 
 def build_description(product):
     row = product.get("row", [])
-    def col(idx):
-        return row[idx].strip() if len(row) > idx and row[idx] else ""
+    def col(naam):
+        # Naam-gebaseerde lookup i.p.v. magische kolomnummers - die braken
+        # eerder al eens stilletjes toen het schema (aanmaaktijd, url_1-5)
+        # veranderde zonder dat de indices hier werden bijgewerkt.
+        idx = COL.get(naam)
+        if idx is None or len(row) <= idx or not row[idx]:
+            return ""
+        return row[idx].strip()
     
     # Als marktplaats_productmanager.py al een kant-en-klare, opgemaakte
     # omschrijving.txt in de artikelnummer-map heeft gezet, gebruik die
     # rechtstreeks - dat is dan de enige plek waar de opmaak wordt beheerd.
-    folder_locatie = col(19)
+    folder_locatie = col("folder_locatie")
     if folder_locatie:
         txt_path = os.path.join(folder_locatie, "omschrijving.txt")
         if os.path.exists(txt_path):
@@ -336,17 +341,17 @@ def build_description(product):
                 pass  # val terug op de kolom-opbouw hieronder
     
     titel = product.get("titel", "")
-    artikelnummer = col(0)
-    omschrijving = col(3)
-    lengte = col(5)
-    breedte = col(6)
-    hoogte = col(7)
-    gewicht = col(8)
-    conditie = col(9)
-    schades = col(10)
-    waarde = col(11)
-    waarde_extra = col(12)
-    voorwaarden = col(23)
+    artikelnummer = col("artikelnummer")
+    omschrijving = col("omschrijving")
+    lengte = col("lengte")
+    breedte = col("breedte")
+    hoogte = col("hoogte")
+    gewicht = col("gewicht")
+    conditie = col("conditie")
+    schades = col("staat_details")
+    waarde = col("waarde_min")
+    waarde_extra = col("waarde_max")
+    voorwaarden = col("algemene_voorwaarden")
     
     parts = []
     if titel:
@@ -446,12 +451,6 @@ class MarktplaatsAuto:
         return True
     
     def load_products(self):
-        backend = self.config.get('storage.backend', 'sheets')
-        if backend == 'xml':
-            return self._load_products_xml()
-        return self._load_products_sheets()
-    
-    def _load_products_xml(self):
         self.logger.info("📄 Laden uit lokaal XML-bestand...")
         xml_path = self.config.get('storage.xml_path', '')
         if not xml_path:
@@ -473,11 +472,11 @@ class MarktplaatsAuto:
                     el = prod_el.find(c)
                     row.append(el.text if el is not None and el.text else "")
                 
-                artikelnummer = row[0].strip() if row[0] else ""
-                titel = row[1].strip() if len(row) > 1 and row[1] else ""
-                categorie = row[2].strip() if len(row) > 2 and row[2] else ""
-                online = row[4].strip().lower() if len(row) > 4 and row[4] else ""
-                verkocht = row[20].strip().lower() if len(row) > 20 and row[20] else ""
+                artikelnummer = row[COL["artikelnummer"]].strip() if row[COL["artikelnummer"]] else ""
+                titel = row[COL["titel"]].strip() if len(row) > COL["titel"] and row[COL["titel"]] else ""
+                categorie = row[COL["categorie"]].strip() if len(row) > COL["categorie"] and row[COL["categorie"]] else ""
+                online = row[COL["online"]].strip().lower() if len(row) > COL["online"] and row[COL["online"]] else ""
+                verkocht = row[COL["verkocht"]].strip().lower() if len(row) > COL["verkocht"] and row[COL["verkocht"]] else ""
                 
                 if verkocht == "ja" or online == "ja":
                     continue  # al online staande of verkochte producten niet opnieuw plaatsen
@@ -498,80 +497,6 @@ class MarktplaatsAuto:
         
         except Exception as e:
             self.logger.error(f"Fout bij laden uit XML: {e}")
-            return False
-    
-    def _load_products_sheets(self):
-        self.logger.info("📊 Laden uit Google Sheets...")
-        try:
-            sheet_url = self.config.get('google_sheets.sheet_url', '')
-            creds_file = self.config.get('google_sheets.credentials_file', 'credentials.json')
-            
-            if not sheet_url:
-                self.logger.error("SHEET_URL niet ingesteld!")
-                return False
-            
-            if not os.path.exists(creds_file):
-                self.logger.error(f"credentials.json niet gevonden!")
-                self.logger.info(f"📌 Plaats credentials.json in: {os.getcwd()}")
-                return False
-            
-            scope = ["https://spreadsheets.google.com/feeds", 
-                     "https://www.googleapis.com/auth/spreadsheets",
-                     "https://www.googleapis.com/auth/drive"]
-            creds = Credentials.from_service_account_file(creds_file, scopes=scope)
-            client = gspread.authorize(creds)
-            
-            sheet = client.open_by_url(sheet_url)
-            worksheet = sheet.get_worksheet(0)
-            all_values = worksheet.get_all_values()
-            
-            hidden_rows = set()
-            try:
-                meta = sheet.fetch_sheet_metadata(
-                    params={"fields": "sheets(properties(sheetId),data(rowMetadata(hiddenByUser)))"}
-                )
-                for s in meta.get("sheets", []):
-                    if s["properties"]["sheetId"] == worksheet.id:
-                        row_meta = s.get("data", [{}])[0].get("rowMetadata", [])
-                        for i, rm in enumerate(row_meta):
-                            if rm.get("hiddenByUser"):
-                                hidden_rows.add(i + 1)
-                        break
-            except Exception as e:
-                self.logger.warning(f"Kon verborgen-rij-metadata niet ophalen: {e}")
-            
-            rows = []
-            for idx, row in enumerate(all_values[1:], start=2):
-                if idx in hidden_rows:
-                    continue
-                if len(row) < 3:
-                    continue
-                
-                artikelnummer = row[0].strip() if row[0] else ""
-                titel = row[1].strip() if len(row) > 1 and row[1] else ""
-                categorie = row[2].strip() if len(row) > 2 and row[2] else ""
-                online = row[4].strip().lower() if len(row) > 4 and row[4] else ""
-                verkocht = row[20].strip().lower() if len(row) > 20 and row[20] else ""
-                
-                if verkocht == "ja" or online == "ja":
-                    continue  # al online staande of verkochte producten niet opnieuw plaatsen
-                
-                if artikelnummer and titel:
-                    rows.append({
-                        "rij": idx,
-                        "artikelnummer": artikelnummer,
-                        "titel": titel,
-                        "categorie": categorie or titel,
-                        "row": row
-                    })
-            
-            self.products = rows
-            self.pending = rows.copy()
-            self.logger.info(f"✅ {len(rows)} producten geladen ({len(hidden_rows)} verborgen rijen overgeslagen)")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Fout bij laden: {e}")
             return False
     
     def process_products(self):
@@ -724,8 +649,16 @@ class MarktplaatsAuto:
             else:
                 self.logger.success(f"✅ Product {product['artikelnummer']} voltooid!")
                 try:
-                    self._mark_product_online(product['artikelnummer'])
-                    self.logger.info("   📤 Gemarkeerd als 'online' in de opslag")
+                    huidige_url = ""
+                    try:
+                        huidige_url = self.driver.current_url
+                    except Exception:
+                        pass
+                    self._mark_product_online(product['artikelnummer'], huidige_url)
+                    if huidige_url:
+                        self.logger.info(f"   📤 Gemarkeerd als 'online', URL opgeslagen: {huidige_url}")
+                    else:
+                        self.logger.info("   📤 Gemarkeerd als 'online' in de opslag")
                 except Exception as e:
                     self.logger.warning(f"   ⚠️ Kon niet als 'online' markeren in de opslag: {e}")
             return True
@@ -734,17 +667,12 @@ class MarktplaatsAuto:
             self.logger.error(f"Fout bij product {product['artikelnummer']}: {e}")
             return False
     
-    def _mark_product_online(self, artikelnummer):
-        """Zet 'online' op ja voor dit product in de actieve opslag (XML of
-        Sheets), zodat een volgende uploadsessie dit product overslaat en
-        marktplaats_productmanager.py het meteen als online toont."""
-        backend = self.config.get('storage.backend', 'sheets')
-        if backend == 'xml':
-            self._mark_product_online_xml(artikelnummer)
-        else:
-            self._mark_product_online_sheets(artikelnummer)
-    
-    def _mark_product_online_xml(self, artikelnummer):
+    def _mark_product_online(self, artikelnummer, advertentie_url=None):
+        """Zet 'online' op ja voor dit product in de XML, zodat een
+        volgende uploadsessie dit product overslaat en
+        marktplaats_productmanager.py het meteen als online toont. Slaat
+        ook de huidige browser-URL op (in het eerste lege url_1..url_5-
+        veld), indien gegeven."""
         import xml.etree.ElementTree as ET
         xml_path = self.config.get('storage.xml_path', '')
         if not xml_path or not os.path.exists(xml_path):
@@ -759,30 +687,22 @@ class MarktplaatsAuto:
                 if online_el is None:
                     online_el = ET.SubElement(prod_el, "online")
                 online_el.text = "ja"
+                if advertentie_url:
+                    # Zet de URL in het eerste lege url_1..url_5-veld (een
+                    # product kan op meerdere pagina's tegelijk staan).
+                    for slot in ("url_1", "url_2", "url_3", "url_4", "url_5"):
+                        slot_el = prod_el.find(slot)
+                        bestaande_waarde = (slot_el.text or "").strip() if slot_el is not None else ""
+                        if not bestaande_waarde:
+                            if slot_el is None:
+                                slot_el = ET.SubElement(prod_el, slot)
+                            slot_el.text = advertentie_url
+                            break
                 gevonden = True
                 break
         if not gevonden:
             raise ValueError("Artikelnummer niet gevonden in XML")
         tree.write(xml_path, encoding="utf-8", xml_declaration=True)
-    
-    def _mark_product_online_sheets(self, artikelnummer):
-        creds = self.config.get('google_sheets.credentials_file', 'credentials.json')
-        sheet_url = self.config.get('google_sheets.sheet_url', '')
-        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        credentials = Credentials.from_service_account_file(creds, scopes=scopes)
-        client = gspread.authorize(credentials)
-        sheet = client.open_by_url(sheet_url)
-        worksheet = sheet.get_worksheet(0)
-        all_values = worksheet.get_all_values()
-        row_num = None
-        for idx, row in enumerate(all_values, start=1):
-            if row and row[0] == artikelnummer:
-                row_num = idx
-                break
-        if row_num is None:
-            raise ValueError("Artikelnummer niet gevonden in Google Sheets")
-        online_col = COLUMNS.index("online") + 1  # 1-indexed
-        worksheet.update_cell(row_num, online_col, "ja")
     
     def go_to_next(self):
         self.wait_for_user = False
@@ -881,28 +801,18 @@ class App:
         self.profile_name_entry = Gtk.Entry()
         grid.attach(self.profile_name_entry, 1, 1, 1, 1)
         
-        # Opslagmethode sectie
+        # Opslag sectie
         label = Gtk.Label()
-        label.set_markup("<b>Opslagmethode</b>")
+        label.set_markup("<b>Opslag (lokaal XML-bestand)</b>")
         label.set_halign(Gtk.Align.START)
         label.set_margin_top(10)
         settings_box.pack_start(label, False, False, 0)
         
-        backend_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        settings_box.pack_start(backend_row, False, False, 0)
-        
-        self.backend_combo = Gtk.ComboBoxText()
-        self.backend_combo.append("sheets", "Google Sheets")
-        self.backend_combo.append("xml", "Lokaal XML-bestand")
-        self.backend_combo.connect("changed", self._on_backend_changed)
-        backend_row.pack_start(self.backend_combo, False, False, 0)
-        
         backend_hint = Gtk.Label()
-        backend_hint.set_markup("<small><i>⚠️ Moet overeenkomen met de opslagmethode in marktplaats_productmanager.py</i></small>")
+        backend_hint.set_markup("<small><i>⚠️ Moet hetzelfde bestand zijn als in marktplaats_productmanager.py</i></small>")
         backend_hint.set_halign(Gtk.Align.START)
-        backend_row.pack_start(backend_hint, False, False, 0)
+        settings_box.pack_start(backend_hint, False, False, 0)
         
-        # XML-pad sectie (alleen zichtbaar als XML gekozen is)
         self.xml_grid = Gtk.Grid()
         self.xml_grid.set_column_spacing(10)
         self.xml_grid.set_row_spacing(5)
@@ -920,39 +830,6 @@ class App:
         browse_xml_btn.connect("clicked", self._browse_xml)
         xml_path_box.pack_start(browse_xml_btn, False, False, 0)
         self.xml_grid.attach(xml_path_box, 1, 0, 1, 1)
-        
-        # Google Sheets sectie
-        self.sheets_label = Gtk.Label()
-        self.sheets_label.set_markup("<b>Google Sheets</b>")
-        self.sheets_label.set_halign(Gtk.Align.START)
-        self.sheets_label.set_margin_top(10)
-        settings_box.pack_start(self.sheets_label, False, False, 0)
-        
-        self.sheets_grid = Gtk.Grid()
-        grid = self.sheets_grid
-        grid.set_column_spacing(10)
-        grid.set_row_spacing(5)
-        grid.set_margin_bottom(10)
-        settings_box.pack_start(grid, False, False, 0)
-        
-        label = Gtk.Label(label="Sheet URL:")
-        label.set_halign(Gtk.Align.END)
-        grid.attach(label, 0, 0, 1, 1)
-        self.sheet_url_entry = Gtk.Entry()
-        self.sheet_url_entry.set_hexpand(True)
-        grid.attach(self.sheet_url_entry, 1, 0, 1, 1)
-        
-        label = Gtk.Label(label="Credentials.json:")
-        label.set_halign(Gtk.Align.END)
-        grid.attach(label, 0, 1, 1, 1)
-        creds_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        self.creds_file_entry = Gtk.Entry()
-        self.creds_file_entry.set_hexpand(True)
-        creds_box.pack_start(self.creds_file_entry, True, True, 0)
-        browse_btn = Gtk.Button(label="Bladeren")
-        browse_btn.connect("clicked", self._browse_creds)
-        creds_box.pack_start(browse_btn, False, False, 0)
-        grid.attach(creds_box, 1, 1, 1, 1)
         
         # Paden sectie
         label = Gtk.Label()
@@ -1079,12 +956,6 @@ class App:
         self.logger = Logger(self.log_text_view)
         self.auto.logger = self.logger
     
-    def _on_backend_changed(self, widget):
-        is_xml = self.backend_combo.get_active_id() == "xml"
-        self.xml_grid.set_visible(is_xml)
-        self.sheets_label.set_visible(not is_xml)
-        self.sheets_grid.set_visible(not is_xml)
-    
     def _browse_xml(self, widget):
         dialog = Gtk.FileChooserDialog(
             title="Selecteer of maak producten.xml",
@@ -1106,26 +977,6 @@ class App:
             self.xml_path_entry.set_text(dialog.get_filename())
         dialog.destroy()
     
-    def _browse_creds(self, widget):
-        dialog = Gtk.FileChooserDialog(
-            title="Selecteer credentials.json",
-            parent=self.window,
-            action=Gtk.FileChooserAction.OPEN
-        )
-        dialog.add_buttons(
-            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
-            Gtk.STOCK_OPEN, Gtk.ResponseType.OK
-        )
-        filter_json = Gtk.FileFilter()
-        filter_json.set_name("JSON files")
-        filter_json.add_pattern("*.json")
-        dialog.add_filter(filter_json)
-        
-        response = dialog.run()
-        if response == Gtk.ResponseType.OK:
-            self.creds_file_entry.set_text(dialog.get_filename())
-        dialog.destroy()
-    
     def _browse_path(self, widget):
         dialog = Gtk.FileChooserDialog(
             title="Selecteer afbeeldingen map",
@@ -1144,17 +995,11 @@ class App:
     
     def _load_config_to_gui(self):
         storage = self.config.get('storage', {})
-        self.backend_combo.set_active_id(storage.get('backend', 'sheets'))
         self.xml_path_entry.set_text(storage.get('xml_path', ''))
-        self._on_backend_changed(self.backend_combo)
         
         chrome = self.config.get('chrome', {})
         self.profile_path_entry.set_text(chrome.get('user_data_dir', os.path.expanduser("~/.config/google-chrome")))
         self.profile_name_entry.set_text(chrome.get('profile', "Default"))
-        
-        gs = self.config.get('google_sheets', {})
-        self.sheet_url_entry.set_text(gs.get('sheet_url', ''))
-        self.creds_file_entry.set_text(gs.get('credentials_file', 'credentials.json'))
         
         paths = self.config.get('paths', {})
         self.image_path_entry.set_text(paths.get('base_image_path', os.path.expanduser("~/Afbeeldingen")))
@@ -1164,12 +1009,9 @@ class App:
         self.wait_products_entry.set_text(str(prefs.get('wait_between_products', 3)))
     
     def _save_config(self, widget):
-        self.config.set('storage.backend', self.backend_combo.get_active_id() or 'sheets')
         self.config.set('storage.xml_path', self.xml_path_entry.get_text().strip())
         self.config.set('chrome.user_data_dir', self.profile_path_entry.get_text().strip())
         self.config.set('chrome.profile', self.profile_name_entry.get_text().strip())
-        self.config.set('google_sheets.sheet_url', self.sheet_url_entry.get_text().strip())
-        self.config.set('google_sheets.credentials_file', self.creds_file_entry.get_text().strip())
         self.config.set('paths.base_image_path', self.image_path_entry.get_text().strip())
         self.config.set('preferences.max_title_length', int(self.max_title_entry.get_text().strip() or 60))
         self.config.set('preferences.wait_between_products', int(self.wait_products_entry.get_text().strip() or 3))
@@ -1422,16 +1264,11 @@ else
     cat > MarktplaatsAutomater/config.json << 'EOF'
 {
     "storage": {
-        "backend": "sheets",
         "xml_path": ""
     },
     "chrome": {
         "user_data_dir": "~/.config/google-chrome",
         "profile": "Default"
-    },
-    "google_sheets": {
-        "sheet_url": "",
-        "credentials_file": "credentials.json"
     },
     "paths": {
         "base_image_path": "~/Afbeeldingen"
@@ -1474,4 +1311,3 @@ echo ""
 echo -e "${GREEN}✅ Alles is klaar! Veel succes!${NC}"
 echo -e "${BLUE}📌 GTK versie heeft automatisch de juiste WM_CLASS${NC}"
 echo -e "${BLUE}   Pin to Dash werkt nu zonder extra configuratie!${NC}"
-
